@@ -1,0 +1,88 @@
+name: Bug report
+description: NebulaNet (the room-code server) gives a wrong answer, drops rooms, or won't connect players.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This repository is the NebulaNet service only. A problem inside the game, or one you're not sure about,
+        is best reported in [nebula-coop](https://github.com/NebulaCoop/nebula-coop/issues/new/choose), which
+        also covers NebulaNet.
+
+        **Security problems** (getting into a room without its password, seeing a room's addresses or password,
+        taking over or closing someone else's room) must **not** go here. Report them privately as nebula-coop's
+        [SECURITY.md](https://github.com/NebulaCoop/nebula-coop/blob/main/SECURITY.md) says. **Never paste a room
+        password.**
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What went wrong, and what you expected instead. Include the error the game showed (for example "room not found" or "wrong password").
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to make it happen
+      placeholder: |
+        1. Host a public room with a password
+        2. Open ROOMS > Public on another PC
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: part
+    attributes:
+      label: Which part?
+      options:
+        - Hosting (getting a room code, the room closing)
+        - Joining by code
+        - The ROOMS list (public or private)
+        - The connection after NebulaNet introduced the players (hole punching)
+        - "/v1/stats"
+        - Something else
+    validations:
+      required: true
+  - type: dropdown
+    id: server
+    attributes:
+      label: Which server?
+      options:
+        - The official one (nebulanet.mackery.com)
+        - My own deployment
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Nebula Co-Op version
+      description: For every player involved, if they differ.
+      placeholder: v1.0.3
+    validations:
+      required: true
+  - type: input
+    id: when
+    attributes:
+      label: When did it happen?
+      description: Date, time and time zone, so it can be found in the Worker's logs.
+      placeholder: 2026-11-17 21:30 UTC
+  - type: textarea
+    id: network
+    attributes:
+      label: Players' networks
+      description: Roughly where each player is and how they connect (home router, mobile data, university or office network, VPN). No IP addresses needed.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Game log
+      description: The `[coop]` lines from `%LOCALAPPDATA%\NebulaCoop\logs\latest.log`, from the host and the joiner. Copy it before starting the game again. Remove any IP addresses you'd rather not share.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you send it
+      options:
+        - label: I searched the open issues here and in [nebula-coop](https://github.com/NebulaCoop/nebula-coop/issues).
+          required: true
+        - label: This is not a security problem, and I haven't pasted a room password.
+          required: true
