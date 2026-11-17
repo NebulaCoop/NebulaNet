@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest something NebulaNet should do, such as a CoopNet feature it doesn't have yet.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why?
+      description: The problem it solves for players or hosts.
+    validations:
+      required: true
+  - type: textarea
+    id: coopnet
+    attributes:
+      label: How CoopNet does it
+      description: NebulaNet follows sm64coopdx's CoopNet. If it has this, how does it work there?
+  - type: textarea
+    id: cost
+    attributes:
+      label: Cost
+      description: NebulaNet has to fit Cloudflare's Workers Free plan. If you know what this would cost in requests or storage, say so.
