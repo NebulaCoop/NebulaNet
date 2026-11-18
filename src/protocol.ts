@@ -34,8 +34,20 @@
 //   POST /v1/report {"code":"K7QX2M","ok":false,"candidates":[…]}  how a join went (CoopNet's PEER_FAILED): the host
 //                                                            hears {"t":"joiner_failed","candidates":[…]}
 //   GET /v1/stats  {"current":{"rooms","players"},"hourly":[…],"daily":[…]}  CoopNet's metrics
-// "room" and the join's answer also carry "ice": {"stun":[{"host","port"}…],"turn":[{"host","port","username",
-// "password"}…]}, the STUN and TURN servers to use (CoopNet's MPACKET_STUN_TURN).
+// "room" and the join's answer also carry "ice": {"stun":[{"host","port"}…],"turn":[]}, the STUN servers to use
+// (CoopNet's MPACKET_STUN_TURN). TURN relays are asked for only when a join can't punch through:
+//   POST /v1/relay {"code","password","protocol"}            a joiner that heard nothing back from the host's addresses
+//   200 {"turn":[{"host","port","username","password"}…]}    TURN servers to relay through (Cloudflare's credentials
+//                                                            last a day); 503 {"error":"no_relay"} when none is set
+//                                                            up or this month's relay budget is used; 403, 404, 429
+//                                                            as a join
+//   POST /v1/relay {"code","password","protocol","relay":"…"}  the joiner's relayed address (its TURN allocation):
+//   200 {"ok":true}                                          the host hears {"t":"joiner","candidates":["…"],
+//                                                            "relay":true,"via":"…"} and punches toward it; "via" is
+//                                                            the joiner's own address as NebulaNet saw it (what the
+//                                                            host's bans go by), and a host from before relays just
+//                                                            punches toward the candidate
+//   POST /v1/report may say "relayed":true: the join went through the relay.
 //
 // A candidate is an address a side's game socket may be reached at: "203.0.113.5:61000" or "[2001:db8::9]:61000".
 // The first is its public address as a STUN server saw it; the others its addresses on its own network.
@@ -301,6 +313,25 @@ export function parseJoinRequest(raw: string): JoinRequest | null {
     : { code, candidates, password: secret, protocol: spoken };
 }
 
+// A joiner asking for a relay (no `relay`), or telling the host where its relay is.
+export interface RelayRequest {
+  code: string;
+  password: string;
+  protocol: number;
+  relay: string | null;
+}
+
+export function parseRelayRequest(raw: string): RelayRequest | null {
+  const body = object(raw);
+  if (body === null) return null;
+  const code = normalizeCode(body.code);
+  const secret = password(body.password);
+  const spoken = protocol(body.protocol);
+  const relay = body.relay === undefined ? null : parseCandidate(body.relay);
+  if (code === null || secret === null || spoken === null || (body.relay !== undefined && relay === null)) return null;
+  return { code, password: secret, protocol: spoken, relay };
+}
+
 export interface ListRequest {
   game: string;
   password: string;
@@ -354,10 +385,12 @@ export function sortListed(rooms: ListedRoom[]): ListedRoom[] {
 }
 
 // A joiner's word on how its join went: ok, or it couldn't reach the host (its candidates, for the host's log).
+// relayed: it went through a TURN relay.
 export interface Report {
   code: string;
   ok: boolean;
   candidates: string[];
+  relayed: boolean;
 }
 
 export function parseReport(raw: string): Report | null {
@@ -365,7 +398,8 @@ export function parseReport(raw: string): Report | null {
   if (body === null || typeof body.ok !== "boolean") return null;
   const code = normalizeCode(body.code);
   const candidates = body.candidates === undefined ? [] : parseCandidates(body.candidates);
-  return code === null || candidates === null ? null : { code, ok: body.ok, candidates };
+  const relayed = body.relayed === true;
+  return code === null || candidates === null ? null : { code, ok: body.ok, candidates, relayed };
 }
 
 // A room takes a join while it has room for one more.

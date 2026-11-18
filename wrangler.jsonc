@@ -10,23 +10,27 @@
     "bindings": [
       { "name": "ROOMS", "class_name": "RoomObject" },
       // The room list and the numbers (src/directory.ts).
-      { "name": "LOBBIES", "class_name": "LobbyDirectory" }
+      { "name": "LOBBIES", "class_name": "LobbyDirectory" },
+      // TURN relays and their monthly budget (src/relay.ts).
+      { "name": "RELAYS", "class_name": "RelayBudget" }
     ]
   },
   // SQLite-backed Durable Objects work on the Workers free plan.
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["RoomObject"] },
-    { "tag": "v2", "new_sqlite_classes": ["LobbyDirectory"] }
+    { "tag": "v2", "new_sqlite_classes": ["LobbyDirectory"] },
+    { "tag": "v3", "new_sqlite_classes": ["RelayBudget"] }
   ],
   "observability": { "enabled": true },
   // Workers Builds' branch Previews (npx wrangler preview): each gets its own Durable Object namespaces, so a branch
   // never touches production's rooms. The bindings are repeated because the code reads them from env; secrets (TURN)
-  // aren't inherited, so Previews hand out STUN only.
+  // aren't inherited, so Previews hand out no relays.
   "previews": {
     "durable_objects": {
       "bindings": [
         { "name": "ROOMS", "class_name": "RoomObject" },
-        { "name": "LOBBIES", "class_name": "LobbyDirectory" }
+        { "name": "LOBBIES", "class_name": "LobbyDirectory" },
+        { "name": "RELAYS", "class_name": "RelayBudget" }
       ]
     }
   }

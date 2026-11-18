@@ -32,11 +32,12 @@ export interface Numbers {
   players: number;
 }
 
-// The most rooms and players open at once in an hour or a day, and the joins in it: made, and failed (the joiner
-// couldn't reach the host).
+// The most rooms and players open at once in an hour or a day, and the joins in it: made, failed (the joiner
+// couldn't reach the host), and made through a TURN relay (counted in joins too).
 export interface Period extends Numbers {
   joins: number;
   failed: number;
+  relayed: number;
 }
 
 export interface Stats {
@@ -65,6 +66,12 @@ export class LobbyDirectory extends DurableObject<Record<string, never>> {
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS hours (
       hour INTEGER PRIMARY KEY, rooms INTEGER NOT NULL, players INTEGER NOT NULL, joins INTEGER NOT NULL DEFAULT 0,
       failed INTEGER NOT NULL DEFAULT 0)`);
+    // Relayed joins came after the hours did.
+    try {
+      ctx.storage.sql.exec("ALTER TABLE hours ADD COLUMN relayed INTEGER NOT NULL DEFAULT 0");
+    } catch {
+      // already there
+    }
   }
 
   // A room opened, changed or is still open. False when it asked to be public but its address already has
@@ -115,22 +122,22 @@ export class LobbyDirectory extends DurableObject<Record<string, never>> {
     return sortListed(rows.map((row) => JSON.parse(row.room) as ListedRoom));
   }
 
-  // A join went through (ok) or failed.
-  joined(ok: boolean): void {
+  // A join went through (ok) or failed; relayed: through a TURN relay.
+  joined(ok: boolean, relayed = false): void {
     const now = Date.now();
     this.count(now);
     this.ctx.storage.sql.exec(
-      `UPDATE hours SET joins = joins + ?, failed = failed + ? WHERE hour = ?`,
-      ok ? 1 : 0, ok ? 0 : 1, Math.floor(now / HOUR_MS));
+      `UPDATE hours SET joins = joins + ?, failed = failed + ?, relayed = relayed + ? WHERE hour = ?`,
+      ok ? 1 : 0, ok ? 0 : 1, ok && relayed ? 1 : 0, Math.floor(now / HOUR_MS));
   }
 
   stats(): Stats {
     const now = Date.now();
     this.expire(now);
     const current = this.current();
-    type Row = { hour: number; rooms: number; players: number; joins: number; failed: number };
+    type Row = { hour: number; rooms: number; players: number; joins: number; failed: number; relayed: number };
     const hours = this.ctx.storage.sql.exec<Row>(
-      "SELECT hour, rooms, players, joins, failed FROM hours WHERE hour >= ? ORDER BY hour",
+      "SELECT hour, rooms, players, joins, failed, relayed FROM hours WHERE hour >= ? ORDER BY hour",
       Math.floor(now / HOUR_MS) - KEEP_HOURS).toArray();
     const hourly = hours.slice(-48).map((row) => ({
       hour: new Date(row.hour * HOUR_MS).toISOString(),
@@ -138,16 +145,18 @@ export class LobbyDirectory extends DurableObject<Record<string, never>> {
       players: row.players,
       joins: row.joins,
       failed: row.failed,
+      relayed: row.relayed,
     }));
     const days = new Map<string, Period>();
     for (const row of hours) {
       const day = new Date(row.hour * HOUR_MS).toISOString().slice(0, 10);
-      const most = days.get(day) ?? { rooms: 0, players: 0, joins: 0, failed: 0 };
+      const most = days.get(day) ?? { rooms: 0, players: 0, joins: 0, failed: 0, relayed: 0 };
       days.set(day, {
         rooms: Math.max(most.rooms, row.rooms),
         players: Math.max(most.players, row.players),
         joins: most.joins + row.joins,
         failed: most.failed + row.failed,
+        relayed: most.relayed + row.relayed,
       });
     }
     const daily = [...days].slice(-30).map(([day, period]) => ({ day, ...period }));

@@ -161,9 +161,9 @@ test("the list shows rooms without their addresses, fullest first and full ones 
 });
 
 test("joiners report how a join went", () => {
-  assert.deepEqual(parseReport('{"code":"k7qx2m","ok":true}'), { code: "K7QX2M", ok: true, candidates: [] });
+  assert.deepEqual(parseReport('{"code":"k7qx2m","ok":true}'), { code: "K7QX2M", ok: true, candidates: [], relayed: false });
   assert.deepEqual(parseReport('{"code":"K7QX2M","ok":false,"candidates":["203.0.113.9:50000"]}'),
-                   { code: "K7QX2M", ok: false, candidates: ["203.0.113.9:50000"] });
+                   { code: "K7QX2M", ok: false, candidates: ["203.0.113.9:50000"], relayed: false });
   assert.equal(parseReport('{"code":"K7QX2M"}'), null);
 });
 

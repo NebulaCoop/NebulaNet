@@ -1,15 +1,18 @@
 // NebulaNet: introduces Nebula co-op players so nobody forwards a port (Nebula's docs/COOP_PLAN.md, "Hosting"). It is
 // sm64coopdx's CoopNet made for Nebula: rooms (CoopNet's lobbies) with a name, mode, description and password, lists
 // of them (the public ones, and the private ones by password), the host's updates, password and version checks,
-// keepalives, failed joins reported back, STUN and TURN servers handed out, and numbers on how much it's used. It never carries game traffic: Nebula's players form a star
-// around their host, so a joiner only ever needs the host's addresses and the host the joiner's, and both games
-// punch through their routers. See protocol.ts for the messages.
+// keepalives, failed joins reported back, STUN and TURN servers handed out, and numbers on how much it's used. It never
+// carries game traffic: Nebula's players form a star around their host, so a joiner only ever needs the host's
+// addresses and the host the joiner's, and both games punch through their routers. A join that can't punch through
+// asks for a TURN relay (relay.ts): the joiner relays through it and the host sends to the relay, so only the
+// joiner's game speaks TURN. See protocol.ts for the messages.
 //
 // Each room is a Durable Object named by its code. Its host's WebSocket uses the hibernation API, so an open room
 // that nobody is joining costs nothing while it waits. The room list and the numbers are one more Durable Object
 // (directory.ts) that the rooms keep up to date.
 import { DurableObject } from "cloudflare:workers";
 import { LobbyDirectory } from "./directory.ts";
+import { RelayBudget, type RelayEnv } from "./relay.ts";
 import {
   GAME,
   MAX_MESSAGE,
@@ -25,20 +28,19 @@ import {
   parseHostMessage,
   parseJoinRequest,
   parseListRequest,
+  parseRelayRequest,
   parseReport,
 } from "./protocol.ts";
 
-export { LobbyDirectory };
+export { LobbyDirectory, RelayBudget };
 
-export interface Env {
+// The TURN settings are relay.ts's: TURN_SERVERS (CoopNet's turn-servers.cfg, "host:user:pass:port" lines), or a
+// Cloudflare TURN key (TURN_KEY_ID, TURN_KEY_API_TOKEN) with CF_ACCOUNT_ID and CF_ANALYTICS_TOKEN to keep its usage
+// inside RELAY_BUDGET_GB (README.md, "TURN relays"). Secrets; none set, no relays.
+export interface Env extends RelayEnv {
   ROOMS: DurableObjectNamespace<RoomObject>;
   LOBBIES: DurableObjectNamespace<LobbyDirectory>;
-  // CoopNet's turn-servers.cfg, one "host:user:pass:port" a line (or comma between them): TURN servers handed to
-  // games for joins that can't punch through. A secret; none set, none handed out.
-  TURN_SERVERS?: string;
-  // Or a Cloudflare TURN key (dashboard, Realtime, TURN): short-lived credentials made for each room and join.
-  TURN_KEY_ID?: string;
-  TURN_KEY_API_TOKEN?: string;
+  RELAYS: DurableObjectNamespace<RelayBudget>;
   // "host:port" STUN servers, comma between them; unset: Cloudflare's.
   STUN_SERVERS?: string;
 }
@@ -67,7 +69,8 @@ interface HostAttachment {
   owner?: string;      // the host's address, hashed: how many public rooms it has is limited (directory.ts)
 }
 
-// STUN and TURN servers as CoopNet's MPACKET_STUN_TURN hands them out.
+// STUN and TURN servers as CoopNet's MPACKET_STUN_TURN hands them out. "turn" stays empty: relays are asked for by a
+// join that couldn't punch through (/v1/relay), so credentials aren't handed to every room and join.
 interface Ice {
   stun: { host: string; port: number }[];
   turn: { host: string; port: number; username: string; password: string }[];
@@ -106,42 +109,17 @@ function hostPort(text: string): { host: string; port: number } | null {
   return colon > 0 && Number.isInteger(port) && port > 0 && port < 65536 && host.length > 0 ? { host, port } : null;
 }
 
-async function iceServers(env: Env): Promise<Ice> {
+function iceServers(env: Env): Ice {
   const ice: Ice = { stun: [], turn: [] };
   for (const text of (env.STUN_SERVERS ?? DEFAULT_STUN).split(",")) {
     const server = hostPort(text.trim());
     if (server !== null) ice.stun.push(server);
   }
-  for (const line of (env.TURN_SERVERS ?? "").split(/[\n,]/)) {
-    const parts = line.trim().split(":");
-    if (parts.length !== 4) continue;
-    const port = Number(parts[3]);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
-    ice.turn.push({ host: parts[0], username: parts[1], password: parts[2], port });
-  }
-  if (env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN) {
-    try {
-      const answer = await fetch(
-        `https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${env.TURN_KEY_API_TOKEN}`, "content-type": "application/json" },
-          body: JSON.stringify({ ttl: 86_400 }),
-        });
-      const body = (await answer.json()) as { iceServers?: { urls: string[]; username?: string; credential?: string }[] };
-      for (const server of body.iceServers ?? []) {
-        for (const url of server.urls) {
-          // Plain UDP TURN only: "turn:turn.cloudflare.com:3478?transport=udp".
-          const match = /^turn:([^?]+)(\?transport=udp)?$/.exec(url);
-          const at = match === null ? null : hostPort(match[1]);
-          if (at === null || !server.username || !server.credential) continue;
-          ice.turn.push({ ...at, username: server.username, password: server.credential });
-        }
-      }
-    } catch {
-      // No TURN this time: punching still works for most.
-    }
-  }
   return ice;
+}
+
+function relays(env: Env): DurableObjectStub<RelayBudget> {
+  return env.RELAYS.get(env.RELAYS.idFromName("relays"));
 }
 
 export class RoomObject extends DurableObject<Env> {
@@ -167,6 +145,10 @@ export class RoomObject extends DurableObject<Env> {
     if (url.pathname === "/host") return this.acceptHost(code, request.headers.get("x-nebulanet-owner") ?? "");
     if (url.pathname === "/join") return this.join(await request.text());
     if (url.pathname === "/report") return this.report(await request.text());
+    if (url.pathname === "/relay") {
+      return this.relay(await request.text(), request.headers.get("x-nebulanet-asker") ?? "",
+                        request.headers.get("x-nebulanet-via") ?? "");
+    }
     return json({ error: "not_found" }, 404);
   }
 
@@ -245,7 +227,7 @@ export class RoomObject extends DurableObject<Env> {
         code: attachment.code,
         protocol: PROTOCOL,
         public: attachment.everyone && shown,
-        ice: await iceServers(this.env),
+        ice: iceServers(this.env),
       }));
       await this.ctx.storage.setAlarm(Date.now() + REFRESH_MS);
       return;
@@ -309,7 +291,31 @@ export class RoomObject extends DurableObject<Env> {
     if (!hasRoom(open.room)) return json({ error: "full" }, 409);
     // The host starts punching toward the joiner while the joiner starts saying hello.
     open.host.send(JSON.stringify({ t: "joiner", candidates: request.candidates }));
-    return json({ ...joinAnswer(open.room), protocol: PROTOCOL, ice: await iceServers(this.env) });
+    return json({ ...joinAnswer(open.room), protocol: PROTOCOL, ice: iceServers(this.env) });
+  }
+
+  // A joiner that couldn't punch through: TURN servers for it (relay.ts decides), and then its relayed address for
+  // the host, who punches toward it as toward any joiner. Checked as a join is, and counted with the joins.
+  private async relay(raw: string, asker: string, via: string): Promise<Response> {
+    const request = parseRelayRequest(raw);
+    if (request === null) return json({ error: "bad_request" }, 400);
+    if (request.protocol < MIN_PROTOCOL) return json({ error: "old_game" }, 426);
+    const open = this.open();
+    if (open === null) return json({ error: "not_found" }, 404);
+    const now = Date.now();
+    this.joins = this.joins.filter((at) => now - at < 60_000);
+    if (this.joins.length >= JOINS_PER_MINUTE) return json({ error: "busy" }, 429);
+    this.joins.push(now);
+    if (open.attachment.secret !== "" && await secretOf(request.password) !== open.attachment.secret) {
+      return json({ error: "wrong_password" }, 403);
+    }
+    if (request.relay !== null) {
+      open.host.send(JSON.stringify({ t: "joiner", candidates: [request.relay], relay: true, via }));
+      return json({ ok: true });
+    }
+    const answer = await relays(this.env).issue(asker);
+    if ("error" in answer) return json(answer, answer.error === "busy" ? 429 : 503);
+    return json(answer);
   }
 
   // A joiner's word on how its join went (CoopNet's MPACKET_PEER_FAILED; the host always wins, so a failed join is
@@ -321,7 +327,7 @@ export class RoomObject extends DurableObject<Env> {
     if (open !== null && !report.ok) {
       open.host.send(JSON.stringify({ t: "joiner_failed", candidates: report.candidates }));
     }
-    await directory(this.env).joined(report.ok);
+    await directory(this.env).joined(report.ok, report.relayed);
     return json({ ok: true });
   }
 }
@@ -353,11 +359,16 @@ async function body(request: Request): Promise<string | null> {
   return text.length > MAX_MESSAGE ? null : text;
 }
 
-// A room's own request (a join, a report), passed to the room of its code.
+// A room's own request (a join, a report, a relay), passed to the room of its code with who asked: its address hashed
+// (relays are limited by it) and as it is (the host's bans go by a relayed joiner's own address).
 async function toRoom(request: Request, env: Env, path: string, code: string | null, text: string): Promise<Response> {
   if (code === null) return json({ error: "bad_request" }, 400);
   const room = env.ROOMS.get(env.ROOMS.idFromName(code));
-  return room.fetch(new Request(`https://room${path}`, { method: "POST", body: text }));
+  const address = request.headers.get("cf-connecting-ip") ?? "";
+  const headers = path === "/relay"
+    ? { "x-nebulanet-asker": await sha256(address), "x-nebulanet-via": address }
+    : undefined;
+  return room.fetch(new Request(`https://room${path}`, { method: "POST", body: text, headers }));
 }
 
 async function listRooms(request: Request, env: Env): Promise<Response> {
@@ -374,15 +385,22 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/v1/host" && request.method === "GET") return hostRoom(request, env);
-    if (request.method === "POST" && (url.pathname === "/v1/join" || url.pathname === "/v1/report")) {
+    const roomPaths: Record<string, (text: string) => string | null> = {
+      "/v1/join": (text) => parseJoinRequest(text)?.code ?? null,
+      "/v1/report": (text) => parseReport(text)?.code ?? null,
+      "/v1/relay": (text) => parseRelayRequest(text)?.code ?? null,
+    };
+    const codeOf = roomPaths[url.pathname];
+    if (request.method === "POST" && codeOf !== undefined) {
       const text = await body(request);
       if (text === null) return json({ error: "bad_request" }, 400);
-      const join = url.pathname === "/v1/join";
-      const code = join ? parseJoinRequest(text)?.code ?? null : parseReport(text)?.code ?? null;
-      return toRoom(request, env, join ? "/join" : "/report", code, text);
+      return toRoom(request, env, url.pathname.slice(3), codeOf(text), text);
     }
     if (url.pathname === "/v1/list" && request.method === "POST") return listRooms(request, env);
-    if (url.pathname === "/v1/stats" && request.method === "GET") return json(await directory(env).stats());
+    if (url.pathname === "/v1/stats" && request.method === "GET") {
+      const [numbers, relay] = await Promise.all([directory(env).stats(), relays(env).usage()]);
+      return json({ ...numbers, relay });
+    }
     if (url.pathname === "/" || url.pathname === "/v1/health") {
       return json({ service: "NebulaNet", protocol: PROTOCOL, min_protocol: MIN_PROTOCOL });
     }
