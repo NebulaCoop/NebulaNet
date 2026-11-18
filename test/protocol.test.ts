@@ -96,6 +96,11 @@ test("a host opens a room and updates it", () => {
   assert.deepEqual(parseHostMessage('{"t":"update","players":3}'), { t: "update", update: { players: 3 } });
   assert.deepEqual(parseHostMessage('{"t":"update","name":"New","description":""}'),
                    { t: "update", update: { name: "New", description: "" } });
+  assert.deepEqual(parseHostMessage('{"t":"update","candidates":["203.0.113.5:62000","192.168.1.4:62000"]}'),
+                   { t: "update", update: { candidates: ["203.0.113.5:62000", "192.168.1.4:62000"] } },
+                   "a host whose router moved its public address gives the new one");
+  assert.equal(parseHostMessage('{"t":"update","candidates":[]}'), null, "a room keeps an address");
+  assert.equal(parseHostMessage('{"t":"update","candidates":["example.com:1"]}'), null, "addresses are numbers");
   assert.equal(parseHostMessage('{"t":"update"}'), null, "an update changes something");
   assert.equal(parseHostMessage('{"t":"update","name":""}'), null, "a room keeps a name");
   assert.equal(parseHostMessage('{"t":"update","players":0}'), null);
@@ -117,6 +122,8 @@ test("updates change only what they name, players within the room", () => {
   };
   assert.deepEqual(applyUpdate(room, { players: 9 }), { ...room, players: 4 });
   assert.deepEqual(applyUpdate(room, { name: "B", mode: "PVP" }), { ...room, name: "B", mode: "PVP" });
+  assert.deepEqual(applyUpdate(room, { candidates: ["5.6.7.8:9"] }), { ...room, candidates: ["5.6.7.8:9"] },
+                   "joiners get the host's new addresses");
 });
 
 test("a joiner asks by code with its own addresses and the password", () => {

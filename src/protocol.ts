@@ -14,7 +14,9 @@
 //   NebulaNet -> host  {"t":"room","code":"K7QX2M","protocol":2,"public":true}  public: in everyone's list (false when
 //                                                            its address already has too many public rooms there)
 //   NebulaNet -> host  {"t":"joiner","candidates":[…]}      someone is joining: punch toward these addresses
-//   host -> NebulaNet  {"t":"update","players":3,"name":"…","mode":"…","description":"…"}  any of them, changed
+//   host -> NebulaNet  {"t":"update","players":3,"name":"…","mode":"…","description":"…","candidates":[…]}  any of
+//                                                            them, changed (candidates: the host's router moved its
+//                                                            public address; joiners from then on get these)
 //   NebulaNet -> host  {"t":"error","error":"…"}            then the socket closes
 //   "ping" -> "pong"                                         a keepalive answered without waking the room; a host
 //                                                            heard from for DEAD_AFTER_MS is closed
@@ -193,6 +195,7 @@ export interface RoomUpdate {
   name?: string;
   mode?: string;
   description?: string;
+  candidates?: string[];
 }
 
 export type HostMessage =
@@ -258,6 +261,11 @@ export function parseHostMessage(raw: string): HostMessage | null {
       if (value === null) return null;
       update[key] = value;
     }
+    if (message.candidates !== undefined) {
+      const candidates = parseCandidates(message.candidates);
+      if (candidates === null) return null;
+      update.candidates = candidates;
+    }
     return Object.keys(update).length === 0 ? null : { t: "update", update };
   }
   return null;
@@ -270,6 +278,7 @@ export function applyUpdate(room: Room, update: RoomUpdate): Room {
   if (update.name !== undefined) next.name = update.name;
   if (update.mode !== undefined) next.mode = update.mode;
   if (update.description !== undefined) next.description = update.description;
+  if (update.candidates !== undefined) next.candidates = [...update.candidates];
   return next;
 }
 

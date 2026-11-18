@@ -24,7 +24,7 @@ NebulaNet is sm64coopdx's CoopNet made for Nebula, on Cloudflare instead of a se
 | Lobbies with game, version, host name, mode, description, password, max players (`LOBBY_CREATE`) | Rooms with the same (`open`), each named by a 6-character code |
 | Public lobbies, listed for everyone (`LOBBY_LIST_GET`) | `POST /v1/list` without a password: the rooms whose host asked for `public` (shown locked when they also have a password) |
 | Private lobbies, found by their password (`LOBBY_LIST_GET` with a password) | `POST /v1/list` with the password. A room that is neither public nor has a password is joined by its code only |
-| The owner updates its lobby (`LOBBY_UPDATE`) | The host sends `update` (players, name, mode, description) |
+| The owner updates its lobby (`LOBBY_UPDATE`) | The host sends `update` (players, name, mode, description, and its addresses when its router moves them) |
 | Join errors: not found, full, wrong password, old CoopNet (`MERR_*`) | `404 not_found`, `409 full`, `403 wrong_password`, `426 old_game` |
 | STUN and TURN servers handed out (`STUN_TURN`, `turn-servers.cfg`) | `ice` in `room` and the join's answer, from `STUN_SERVERS`, `TURN_SERVERS` or a Cloudflare TURN key |
 | Keepalive every 180 s, dead after 240 s | The game pings every 30 s; a host silent for 240 s is closed |
@@ -44,7 +44,7 @@ The full message list is at the top of [`src/protocol.ts`](src/protocol.ts). In 
   name, mode, description, password, public, players, max, candidates) and gets `room` with the code, whether the
   room is in the public list, and the `ice` servers;
   NebulaNet sends `joiner` with a joiner's candidates and `joiner_failed` when one couldn't get through; the host
-  sends `update` when its player count, name, mode or description changes; `ping` is answered `pong`. The room ends
+  sends `update` when its player count, name, mode, description or addresses change (its router moved its public port); `ping` is answered `pong`. The room ends
   when the socket closes. A host whose connection dropped reconnects with `?code=` to get the same code back while no
   other room has taken it.
 - `POST /v1/join` with `{"code","candidates","password","protocol"}` answers the room's name, version, mode,
