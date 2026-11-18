@@ -12,6 +12,11 @@ NebulaNet only introduces them.
 3. NebulaNet gives the friend the host's addresses and tells the host the friend's.
 4. Both games send packets at each other at once, so both routers open a path, and the join carries on as a direct
    one. Nebula's `DirectTransport` does this part (`discover_public_address`, `punch`, `JoinConfig::alternates`).
+5. When nothing gets through for a few seconds (a strict router, mobile data, CGNAT), the friend's game asks
+   NebulaNet for a TURN relay (`POST /v1/relay`), takes an address on it, and NebulaNet tells the host to punch
+   toward that address. The host's packets then reach the friend through the relay, and the friend's reach the host
+   from it. Only the friend's game speaks TURN: to the host the relay is one more address to punch toward, so
+   nothing on the host's side has to let anyone in first.
 
 Hosts can still skip NebulaNet and share `address:port` as before.
 
@@ -26,7 +31,7 @@ NebulaNet is sm64coopdx's CoopNet made for Nebula, on Cloudflare instead of a se
 | Private lobbies, found by their password (`LOBBY_LIST_GET` with a password) | `POST /v1/list` with the password. A room that is neither public nor has a password is joined by its code only |
 | The owner updates its lobby (`LOBBY_UPDATE`) | The host sends `update` (players, name, mode, description, and its addresses when its router moves them) |
 | Join errors: not found, full, wrong password, old CoopNet (`MERR_*`) | `404 not_found`, `409 full`, `403 wrong_password`, `426 old_game` |
-| STUN and TURN servers handed out (`STUN_TURN`, `turn-servers.cfg`) | `ice` in `room` and the join's answer, from `STUN_SERVERS`, `TURN_SERVERS` or a Cloudflare TURN key |
+| STUN and TURN servers handed out (`STUN_TURN`, `turn-servers.cfg`) | `ice` in `room` and the join's answer (STUN, from `STUN_SERVERS`); TURN only to a join that couldn't punch through (`POST /v1/relay`), from `TURN_SERVERS` or a Cloudflare TURN key kept inside a monthly budget |
 | Keepalive every 180 s, dead after 240 s | The game pings every 30 s; a host silent for 240 s is closed |
 | `PEER_FAILED`: the lobby owner always wins | `POST /v1/report`: a joiner that couldn't reach the host says so and the host hears `joiner_failed` |
 | Metrics (`hourly.json`, `daily.json`, `current.json`) | `GET /v1/stats` |
@@ -53,9 +58,15 @@ The full message list is at the top of [`src/protocol.ts`](src/protocol.ts). In 
   as its host does.
 - `POST /v1/list` with `{"game"}` answers `{"rooms":[…]}`: the public rooms. With `{"game","password"}`: the rooms
   that have the password, public or not. Rooms never show their addresses there.
-- `POST /v1/report` with `{"code","ok","candidates"}`: how a join went.
-- `GET /v1/stats`: rooms and players open now, the most at once each hour (48 hours) and day (30 days), and the joins
-  made and failed in each.
+- `POST /v1/relay` with `{"code","password","protocol"}`, from a joiner that heard nothing back: `{"turn":[{"host",
+  "port","username","password"}…]}`, or `503 no_relay` (none set up, or this month's budget is used), `429 busy`
+  (an address gets 12 an hour), and a join's errors. Then with `"relay":"1.2.3.4:5678"` added, its address on the
+  relay: the host hears `joiner` with that candidate, `"relay":true` and `"via"`, the joiner's own address, which
+  the host's bans go by.
+- `POST /v1/report` with `{"code","ok","candidates","relayed"}`: how a join went.
+- `GET /v1/stats`: rooms and players open now, the most at once each hour (48 hours) and day (30 days), the joins
+  made, failed and relayed in each, and `relay`: this month's relay use (`used_gb`, `budget_gb`, relays in use, and
+  whether a new one would be handed out).
 
 Protocol 1 games still work: what they leave out reads as empty, so their rooms have no password and are joined by
 code. So do protocol 2 games from before public rooms: they never ask for `public`, so their rooms stay off the public
@@ -78,17 +89,34 @@ NebulaNet fits Cloudflare's Workers Free plan, with no card needed. Over a free 
 reset (00:00 UTC); nothing is billed. Each open room wakes every 5 minutes (about 12 Durable Object requests and 12
 rows written an hour, twice that for a public or private room, which also refreshes its listing), well inside the free plan's
 100,000 requests and 100,000 rows written a day. Pings cost nothing: Cloudflare answers them without waking the room.
-Game traffic never passes through NebulaNet. Only TURN relays could cost money, and none are handed out until a TURN
-secret is set.
+Game traffic never passes through NebulaNet.
+
+Only Cloudflare's TURN relays could cost money: their first 1,000 GB a month are free, then $0.05/GB. Cloudflare
+counts only what its relays send to the games that asked for them (the joiners): the host's game sends to the relay
+like to any address. A relayed player's traffic hasn't been measured yet; at 30 KB/s (about 100 MB an hour), the free
+1,000 GB would be about 10,000 relayed player-hours a month, and most joins never need a relay. NebulaNet keeps it
+free with a budget (below): past it, relays stop until the next month and joins go back to punching through only.
+`GET /v1/stats` shows the month's use.
 
 ## TURN relays
 
-For joins that can't punch through, NebulaNet hands out TURN servers, as CoopNet does. Set one of these as a secret
-(dashboard, the Worker, Settings, Variables and Secrets):
+For joins that can't punch through, NebulaNet hands out TURN servers, as CoopNet does, but only to a joiner that asked
+for one after trying for a few seconds (`POST /v1/relay`). Set these as secrets (dashboard, the Worker, Settings,
+Variables and Secrets):
 
-- `TURN_SERVERS`: CoopNet's `turn-servers.cfg` lines, `host:user:pass:port`, one a line or commas between them.
-- `TURN_KEY_ID` and `TURN_KEY_API_TOKEN`: a Cloudflare TURN key (Realtime, TURN); NebulaNet makes short-lived
-  credentials for each room and join.
+- `TURN_SERVERS`: CoopNet's `turn-servers.cfg` lines, `host:user:pass:port`, one a line or commas between them (a TURN
+  server of your own: no budget is kept for it).
+- A Cloudflare TURN key, and what keeps it free. NebulaNet makes a credential for each relay (it lasts a day), asks
+  Cloudflare's analytics how much this month's relays sent before handing one out (at most every 10 minutes) and,
+  while any are in use, every 10 minutes. Past the budget it hands out no more and revokes those in use, which ends
+  them. Without the analytics token it can't know, so it hands out no Cloudflare relays at all.
+  1. Cloudflare dashboard, Realtime, TURN Server, Create: name it `NebulaNet`. Set its Turn Token ID as
+     `TURN_KEY_ID` and its API Token as `TURN_KEY_API_TOKEN`.
+  2. My Profile, API Tokens, Create Token, Custom token: permission Account, Account Analytics, Read, for your
+     account. Set it as `CF_ANALYTICS_TOKEN`.
+  3. Your account ID (dashboard, the account's home page, Account details) as `CF_ACCOUNT_ID`.
+  4. Optional: `RELAY_BUDGET_GB` (a plain variable), the GB a month to stop at, 900 when unset and never above the
+     free 1,000. The 100 GB left is room for the relays in use between checks. `0` turns Cloudflare relays off.
 
 `STUN_SERVERS` (`host:port`, commas between) replaces the default `stun.cloudflare.com:3478`.
 
@@ -118,5 +146,4 @@ That address is Nebula's default; its `coop_nebulanet` setting points a game at 
 
 ## Coming next
 
-- Nebula relaying through the TURN servers it is handed, for joins that can't punch through.
 - Discord Join button carrying the room code (on Nebula's side).
